@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Extrator de Quadras (OSM) — Quadras por Ruas</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
+
+  <style>
+    html,body,#map { height: 100%; margin: 0; padding: 0; }
+    body { font-family: Arial, Helvetica, sans-serif; }
+    #app { display: grid; grid-template-columns: 1fr 360px; height: 100vh; }
+    #map { grid-column: 1 / 2; }
+    #panel { grid-column: 2 / 3; padding: 12px; box-shadow: -2px 0 6px rgba(0,0,0,0.08); overflow:auto; }
+    h2 { margin: 0 0 8px 0; font-size: 18px }
+    .controls { margin-bottom: 12px }
+    button { padding: 8px 10px; margin-right: 6px; cursor: pointer }
+    .quadra-item { border-bottom: 1px dashed #ddd; padding: 8px 0; }
+    .quadra-title { font-weight: bold }
+    .small { font-size: 12px; color: #555 }
+    textarea { width:100%; height:90px }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="map"></div>
+    <div id="panel">
+      <h2>Extrator de Quadras por Ruas</h2>
+      <div class="controls">
+        <button id="btn-draw">Desenhar área</button>
+        <button id="btn-bbox">Usar vista atual</button>
+        <button id="btn-clear">Limpar</button>
+      </div>
+
+      <div>
+        <label class="small">Resultados:</label>
+        <div id="results"></div>
+      </div>
+
+      <div style="margin-top:10px">
+        <button id="btn-export">Exportar CSV</button>
+        <button id="btn-geojson">Exportar GeoJSON</button>
+      </div>
+
+      <hr />
+      <div>
+        <strong>Como usar</strong>
+        <ol>
+          <li>Clique em <em>Desenhar área</em> e marque a região desejada, ou ajuste o mapa e clique em <em>Usar vista atual</em>.</li>
+          <li>O app consulta o OpenStreetMap (Overpass API), gera as quadras a partir das ruas e lista as ruas que tocam cada quadra.</li>
+          <li>Você pode exportar CSV ou GeoJSON para uso posterior.</li>
+        </ol>
+      </div>
+
+      <hr />
+      <div class="small">Desenvolvido para registro simples de quadras. Requer conexão com a internet (Overpass API).</div>
+    </div>
+  </div>
+
+  <!-- libs -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsts/2.6.1/jsts.min.js"></script>
+
+  <script>
+    // Helper: create DOM element
+    const $ = (sel) => document.querySelector(sel);
+
+    // Initialize map
+    const map = L.map('map').setView([-23.55, -46.63], 15); // default São Paulo center
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Feature layers
+    const streetsLayer = L.geoJSON(null, { style: { color: '#1f78b4', weight: 2 } }).addTo(map);
+    const blocksLayer = L.geoJSON(null, { style: { color: '#ff7f00', weight: 1, fillOpacity: 0.25 } }).addTo(map);
+
+    // Draw control
+    const drawnItems = new L.FeatureGroup().addTo(map);
+    const drawControl = new L.Control.Draw({ edit: { featureGroup: drawnItems }, draw: { polygon: true, rectangle: true, polyline: false, circle: false, marker: false, circlemarker: false } });
+
+    document.getElementById('btn-draw').addEventListener('click', () => {
+      drawControl.addTo(map);
+      alert('Desenhe um polígono ou retângulo no mapa para definir a área. Após terminar, clique em salvar (editar -> salvar).');
+    });
+
+    map.on(L.Draw.Event.CREATED, function (event) {
+      drawnItems.clearLayers();
+      const layer = event.layer;
+      drawnItems.addLayer(layer);
+      map.removeControl(drawControl);
+      processArea(layer.getBounds());
+    });
+
+    document.getElementById('btn-bbox').addEventListener('click', () => {
+      drawnItems.clearLayers();
+      blocksLayer.clearLayers();
+      streetsLayer.clearLayers();
+      processArea(map.getBounds());
+    });
+
+    document.getElementById('btn-clear').addEventListener('click', () => {
+      drawnItems.clearLayers(); blocksLayer.clearLayers(); streetsLayer.clearLayers(); $('#results').innerHTML='';
+    });
+
+    // Main: build an Overpass query for highways in bbox
+    async function processArea(bounds) {
+      $('#results').innerHTML = '<div class="small">Consultando OpenStreetMap (Overpass)...</div>';
+      const s = bounds.getSouth(); const w = bounds.getWest(); const n = bounds.getNorth(); const e = bounds.getEast();
+      const bbox = `${s},${w},${n},${e}`;
+
+      // Overpass query: ways with highway tag (streets) within bbox, include geometry and tags
+      const query = `[out:json][timeout:60];(way["highway"](${bbox});relation["highway"](${bbox}););out body geom;`;
+
+      try {
+        const res = await fetch('https://overpass-api.de/api/interpreter', {
+          method: 'POST', body: query
+        });
+        if(!res.ok) throw new Error('Erro na consulta Overpass: '+res.status);
+        const data = await res.json();
+
+        // Parse ways into GeoJSON LineStrings
+        const ways = data.elements.filter(e=>e.type==='way');
+        const lines = ways.map(w=>{
+          const coords = w.geometry.map(g=>[g.lon, g.lat]);
+          return {
+            type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: { id: w.id, tags: w.tags || {} }
+          };
+        });
+
+        streetsLayer.clearLayers();
+        blocksLayer.clearLayers();
+
+        const streetsFC = { type:'FeatureCollection', features: lines };
+        streetsLayer.addData(streetsFC);
+
+        // Combine lines into a single multilinestring for polygonize
+        const multi = {
+          type: 'Feature', geometry: { type: 'MultiLineString', coordinates: lines.map(f=>f.geometry.coordinates) }
+        };
+
+        // Use jsts to polygonize
+        const reader = new jsts.io.GeoJSONReader();
+        const geom = reader.read(multi.geometry);
+        const polygonizer = new jsts.operation.polygonize.Polygonizer();
+
+        // add each line to polygonizer
+        if (geom.getCoordinates && geom.getCoordinates().length>0) {
+          // If geom is a MultiLineString, iterate
+          const factory = new jsts.geom.GeometryFactory();
+          const lineStrings = geom.getGeometries ? geom.getGeometries() : [geom];
+          lineStrings.forEach(ls => polygonizer.add(ls));
+        }
+
+        const polys = polygonizer.getPolygons(); // jsts Collection
+        const writer = new jsts.io.GeoJSONWriter();
+
+        // Convert polygons to GeoJSON features
+        const polygonFeatures = [];
+        for (let i=0;i<polys.size();i++){
+          const p = polys.get(i);
+          const gj = writer.write(p);
+          polygonFeatures.push({ type:'Feature', geometry: gj, properties: {} });
+        }
+
+        // If polygonizer returned none, try an alternative polygonize via turf (buffer + polygonize)
+        if(polygonFeatures.length===0){
+          // fallback: buffer small and polygonize with turf
+          try {
+            const buffered = turf.buffer(multi, 0.0001, {units:'degrees'});
+            const polyFromBuffer = turf.polygonize(buffered);
+            polygonFeatures.push(...polyFromBuffer.features);
+          } catch(e){ console.warn('fallback polygonize falhou', e); }
+        }
+
+        // Filter polygons inside bbox and reasonable area
+        const filtered = polygonFeatures.filter(f=>{
+          if(!f.geometry) return false;
+          const area = Math.abs(turf.area(f));
+          return area > 1 && area < 50000000; // area thresholds (m²) - adjust if needed
+        });
+
+        // For each polygon, collect touching street names
+        const results = [];
+        for(let i=0;i<filtered.length;i++){
+          const poly = filtered[i];
+          // find street lines that intersect polygon boundary or intersect polygon
+          const touching = lines.filter(l => {
+            try { return turf.booleanIntersects(poly, l); } catch(e) { return false; }
+          });
+          const names = new Set();
+          touching.forEach(t => {
+            const nm = t.properties.tags && (t.properties.tags.name || t.properties.tags['ref']) ? (t.properties.tags.name || t.properties.tags['ref']) : null;
+            if(nm) names.add(nm);
+          });
+
+          const streetList = Array.from(names).sort();
+          const id = i+1;
+          const props = { id, ruas: streetList.length?streetList:['(sem nome)'], area_m2: Math.round(Math.abs(turf.area(poly))) };
+          results.push({ feature: poly, props });
+        }
+
+        // Add blocks to map with popup
+        const blocksFC = { type:'FeatureCollection', features: results.map(r=>({ type:'Feature', geometry:r.feature.geometry, properties:r.props })) };
+        blocksLayer.addData(blocksFC);
+        blocksLayer.eachLayer(l => {
+          const p = l.feature.properties;
+          l.bindPopup(`<b>Quadra ${p.id}</b><br/><small>Área aprox: ${p.area_m2} m²</small><br/><small>Ruas: ${p.ruas.join(', ')}</small>`);
+        });
+
+        // Show results in panel
+        const $res = $('#results'); $res.innerHTML = '';
+        results.forEach(r => {
+          const div = document.createElement('div'); div.className='quadra-item';
+          div.innerHTML = `<div class="quadra-title">Quadra ${r.props.id}</div><div class="small">Área: ${r.props.area_m2} m²</div><div class="small">Ruas: ${r.props.ruas.join(', ')}</div>`;
+          $res.appendChild(div);
+        });
+
+        // Store for export
+        window._quadrasResult = results;
+        $('#results').scrollTop = 0;
+
+      } catch(err){
+        console.error(err);
+        $('#results').innerHTML = '<div class="small">Erro ao consultar ou processar dados. Veja o console do navegador.</div>';
+      }
+    }
+
+    // Export CSV
+    document.getElementById('btn-export').addEventListener('click', ()=>{
+      const results = window._quadrasResult || [];
+      if(!results.length){ alert('Nenhuma quadra para exportar.'); return; }
+      const rows = [['id_quadra','area_m2','ruas']];
+      results.forEach(r => rows.push([r.props.id, r.props.area_m2, `"${r.props.ruas.join('; ')}"` ]));
+      const csv = rows.map(r=>r.join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'quadras_com_ruas.csv'; a.click(); URL.revokeObjectURL(url);
+    });
+
+    // Export GeoJSON
+    document.getElementById('btn-geojson').addEventListener('click', ()=>{
+      const results = window._quadrasResult || [];
+      if(!results.length){ alert('Nenhuma quadra para exportar.'); return; }
+      const fc = { type:'FeatureCollection', features: results.map(r=>({ type:'Feature', geometry:r.feature.geometry, properties: r.props })) };
+      const blob = new Blob([JSON.stringify(fc,null,2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'quadras.geojson'; a.click(); URL.revokeObjectURL(url);
+    });
+
+  </script>
+</body>
+</html>

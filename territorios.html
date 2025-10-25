@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Registro de Quadras por Bairro</title>
+<style>
+  body {font-family: Arial, sans-serif; background:#f5f7fb; margin:0;}
+  header {background:#fff; padding:12px 16px; border-bottom:1px solid #ddd;}
+  h1 {font-size:18px; margin:0;}
+  .container {display:flex; gap:18px; padding:16px;}
+  nav {width:220px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px;}
+  .nav-item {padding:8px; border-radius:6px; margin-bottom:6px; cursor:pointer;}
+  .nav-item.active {background:#eaf1ff; border:1px solid #c4d8ff;}
+  main {flex:1;}
+  .page {background:#fff; border:1px solid #ddd; border-radius:8px; padding:16px;}
+  .quadra {border:1px solid #ddd; border-radius:6px; padding:10px; margin-top:10px;}
+  .quadra h3 {margin:0 0 6px 0;}
+  .controls {margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;}
+  button {background:#2b7cff; color:#fff; border:none; padding:8px 12px; border-radius:6px; cursor:pointer;}
+  button:hover {opacity:0.9;}
+  input[type="text"], input[type="date"], textarea {width:100%; padding:6px; border:1px solid #ccc; border-radius:4px;}
+  textarea {min-height:60px;}
+  label {font-size:14px;}
+  .thumb {width:100%; height:200px; border:1px dashed #aaa; border-radius:6px; display:flex; align-items:center; justify-content:center; margin-bottom:6px; overflow:hidden;}
+  .thumb img {max-width:100%; max-height:100%;}
+  .footer {padding:10px; text-align:center; font-size:13px; color:#666;}
+</style>
+</head>
+<body>
+<header>
+  <h1>Registro de Quadras — Congregação Bethânia</h1>
+</header>
+
+<div class="container">
+  <nav id="nav"></nav>
+  <main id="content"></main>
+</div>
+
+<div class="footer">💡 Dica: substitua as imagens de cada quadra pelos mapas do bairro correspondente.</div>
+
+<script>
+// === CONFIGURAÇÃO PRINCIPAL ===
+const GOOGLE_SCRIPT_URL = "COLE_AQUI_SUA_URL_DO_APPS_SCRIPT"; // <-- substitua aqui!
+
+
+const bairros = [
+  "Vila Bethânia", "Nova Bethânia","Arlindo Vilaschi 1 e 2",
+  "Soteco", "Areinha", "Campo Verde", "Morada de Bethânia","Caxias do Sul",
+];
+
+
+let dados = {}; // { bairro: [ { id, imagem, marcada, data, observacoes } ] }
+
+// === FUNÇÕES DE INTERFACE ===
+const nav = document.getElementById('nav');
+const content = document.getElementById('content');
+
+function init() {
+  bairros.forEach((b,i)=>{
+    dados[b] = [];
+    const div = document.createElement('div');
+    div.className = 'nav-item' + (i===0?' active':'');
+    div.textContent = b;
+    div.onclick = ()=>mostrarBairro(b);
+    nav.appendChild(div);
+  });
+  mostrarBairro(bairros[0]);
+}
+
+function mostrarBairro(bairro) {
+  Array.from(nav.children).forEach(el=>{
+    el.classList.toggle('active', el.textContent===bairro);
+  });
+  const lista = dados[bairro];
+  content.innerHTML = `
+    <div class="page">
+      <h2>${bairro}</h2>
+      <button onclick="adicionarQuadra('${bairro}')">➕ Adicionar nova quadra</button>
+      <div id="quadras-${bairro}"></div>
+      <div class="controls">
+        <button onclick="exportarCSV('${bairro}')">Exportar CSV</button>
+        <button onclick="exportarJSON('${bairro}')">Exportar JSON</button>
+        <button onclick="enviarGoogleSheets('${bairro}')">Salvar no Google Sheets</button>
+      </div>
+    </div>`;
+  renderizarQuadras(bairro);
+}
+
+function adicionarQuadra(bairro) {
+  const q = { id: Date.now(), imagem:'', marcada:false, data:'', observacoes:'' };
+  dados[bairro].push(q);
+  renderizarQuadras(bairro);
+}
+
+function renderizarQuadras(bairro) {
+  const div = document.getElementById(`quadras-${bairro}`);
+  if (!div) return;
+  div.innerHTML = dados[bairro].map((q,idx)=>`
+    <div class="quadra">
+      <h3>Quadra ${idx+1}</h3>
+      <div class="thumb" id="thumb-${bairro}-${q.id}">
+        ${q.imagem ? `<img src="${q.imagem}">` : `<span>(clique para adicionar imagem)</span>`}
+      </div>
+      <input type="file" id="file-${bairro}-${q.id}" accept="image/*" style="margin-bottom:8px">
+      <label><input type="checkbox" id="check-${bairro}-${q.id}" ${q.marcada?'checked':''}> Marcada</label><br>
+      <label>Data: <input type="date" id="data-${bairro}-${q.id}" value="${q.data||''}"></label><br>
+      <label>Observações:</label>
+      <textarea id="obs-${bairro}-${q.id}">${q.observacoes||''}</textarea>
+      <div class="controls">
+        <button onclick="removerQuadra('${bairro}', ${q.id})">🗑️ Remover</button>
+      </div>
+    </div>`).join('');
+
+  // Ativar eventos
+  dados[bairro].forEach(q=>{
+    const file = document.getElementById(`file-${bairro}-${q.id}`);
+    const check = document.getElementById(`check-${bairro}-${q.id}`);
+    const dataField = document.getElementById(`data-${bairro}-${q.id}`);
+    const obs = document.getElementById(`obs-${bairro}-${q.id}`);
+    const thumb = document.getElementById(`thumb-${bairro}-${q.id}`);
+
+    file.onchange = e=>{
+      const f = e.target.files[0];
+      if (!f) return;
+      const url = URL.createObjectURL(f);
+      q.imagem = url;
+      renderizarQuadras(bairro);
+    };
+    check.onchange = ()=> q.marcada = check.checked;
+    dataField.onchange = ()=> q.data = dataField.value;
+    obs.oninput = ()=> q.observacoes = obs.value;
+    thumb.onclick = ()=> file.click();
+  });
+}
+
+function removerQuadra(bairro, id) {
+  dados[bairro] = dados[bairro].filter(q=>q.id!==id);
+  renderizarQuadras(bairro);
+}
+
+// === EXPORTAÇÕES ===
+function exportarCSV(bairro) {
+  const lista = dados[bairro];
+  const linhas = [['Bairro','Quadra','Marcada','Data','Observações']];
+  lista.forEach((q,i)=>linhas.push([bairro,`Quadra ${i+1}`, q.marcada?'Sim':'Não', q.data, q.observacoes.replace(/"/g,'""')]));
+  const csv = linhas.map(l=>l.join(',')).join('\\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `registros_${bairro}.csv`;
+  a.click();
+}
+
+function exportarJSON(bairro) {
+  const blob = new Blob([JSON.stringify(dados[bairro], null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `registros_${bairro}.json`;
+  a.click();
+}
+
+// === ENVIO PARA GOOGLE SHEETS ===
+async function enviarGoogleSheets(bairro) {
+  if (!GOOGLE_SCRIPT_URL || GOOGLE_SCRIPT_URL.includes("COLE_AQUI")) {
+    alert("⚠️ Cole primeiro a URL do seu Apps Script no código!");
+    return;
+  }
+  const lista = dados[bairro];
+  if (!lista.length) { alert("Nenhuma quadra adicionada neste bairro."); return; }
+
+  const payload = lista.map((q,i)=>({
+    bairro,
+    quadra:`Quadra ${i+1}`,
+    marcada:q.marcada?'Sim':'Não',
+    data:q.data,
+    observacoes:q.observacoes
+  }));
+
+  try {
+    await fetch(GOOGLE_SCRIPT_URL, {
+      method:"POST",
+      mode:"no-cors",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(payload)
+    });
+    alert(`✅ Dados do ${bairro} enviados com sucesso!`);
+  } catch(err) {
+    console.error(err);
+    alert("❌ Erro ao enviar os dados. Verifique a URL do Apps Script.");
+  }
+}
+
+// Inicializa
+init();
+</script>
+</body>
+</html>

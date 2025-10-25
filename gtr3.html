@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Registro de Quadras — v2 (Relatórios)</title>
+<style>
+  :root{--accent:#2b7cff;--danger:#e04b4b;--muted:#666}
+  body {font-family: Arial, Helvetica, sans-serif; margin:0; background:#f5f7fb; color:#111}
+  header{background:#fff;padding:12px 16px;border-bottom:1px solid #e6e9ef;display:flex;justify-content:space-between;align-items:center}
+  h1{font-size:18px;margin:0}
+  .container{display:flex;gap:18px;padding:16px}
+  nav{width:220px;background:#fff;padding:12px;border:1px solid #e6e9ef;border-radius:8px;height:calc(100vh - 96px);overflow:auto}
+  main{flex:1}
+  .page{background:#fff;padding:16px;border:1px solid #e6e9ef;border-radius:8px;min-height:420px;overflow:auto}
+  .quadra{border:1px solid #e6e9ef;border-radius:6px;padding:10px;margin-top:10px;background:#fcfdff}
+  .quadra h3{margin:0 0 8px 0}
+  .controls{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
+  button{background:var(--accent);color:#fff;border:none;padding:8px 12px;border-radius:6px;cursor:pointer}
+  .ghost{background:#fff;color:var(--accent);border:1px solid var(--accent)}
+  button.small{padding:6px 8px;font-size:13px}
+  label{display:block;margin-top:6px;font-size:14px}
+  input[type="text"], input[type="date"], textarea, input[type="file"]{width:100%;padding:6px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}
+  textarea{min-height:60px}
+  .thumb{width:100%;height:180px;border:1px dashed #aaa;border-radius:6px;display:flex;align-items:center;justify-content:center;margin-bottom:6px;overflow:hidden;background:#fff}
+  .thumb img{max-width:100%;max-height:100%}
+  .footer{padding:12px;text-align:center;color:var(--muted);font-size:13px}
+  .nav-item{padding:8px;border-radius:6px;margin-bottom:6px;cursor:pointer}
+  .nav-item.active{background:linear-gradient(90deg,#e9f4ff,#fff);border:1px solid #d0eaff}
+  .row{display:flex;gap:12px}
+  .col{flex:1}
+  .danger{background:var(--danger)}
+  .muted{color:var(--muted);font-size:13px}
+  .filter-box{display:flex;gap:8px;align-items:center;margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Registro de Quadras — Relatórios / Início & Término</h1>
+  <div class="muted">Excluir pede senha. Relatórios por data e bairro.</div>
+</header>
+
+<div class="container">
+  <nav id="nav"></nav>
+  <main id="content"></main>
+</div>
+
+<div class="footer">Guarde o arquivo HTML e use-o localmente. Para enviar ao Google Sheets, cole sua URL do Apps Script no topo do script.</div>
+
+<script>
+/* ================= CONFIGURAÇÃO =================
+ * Cole a URL do Apps Script (implantado como Web App) abaixo:
+ * O script deve receber um POST com um array JSON.
+ */
+const GOOGLE_SCRIPT_URL = "COLE_AQUI_SUA_URL_DO_APPS_SCRIPT";
+
+/* Senha exigida para exclusões */
+const DELETE_PASSWORD = "Snrosa*52";
+
+/* Nomes genéricos dos 8 bairros (você pode editar) */
+const bairros = [
+  "Bairro 1","Bairro 2","Bairro 3","Bairro 4",
+  "Bairro 5","Bairro 6","Bairro 7","Bairro 8"
+];
+
+/* Estrutura de dados: dados[bairro] = [quadraObj,...]
+   quadraObj = {
+     id: number (timestamp),
+     codigo: string (único),
+     responsavel: string,
+     imagem: localObjectURL (session),
+     data_inicio: 'YYYY-MM-DD' or '',
+     data_fim: 'YYYY-MM-DD' or '',
+     observacoes: string
+   }
+*/
+let dados = {};
+bairros.forEach(b=>dados[b]=[]);
+
+/* ---------- UI helpers ---------- */
+const nav = document.getElementById('nav');
+const content = document.getElementById('content');
+
+function init(){
+  // render nav
+  bairros.forEach((b, i) => {
+    const el = document.createElement('div');
+    el.className = 'nav-item' + (i===0? ' active':'');
+    el.textContent = b;
+    el.onclick = ()=>mostrarBairro(b);
+    nav.appendChild(el);
+  });
+  mostrarBairro(bairros[0]);
+}
+
+/* Show selected bairro page */
+function mostrarBairro(bairro){
+  // highlight nav
+  Array.from(nav.children).forEach(n=> n.classList.toggle('active', n.textContent===bairro));
+  // page content
+  content.innerHTML = `
+    <div class="page">
+      <h2>${bairro}</h2>
+      <div class="controls">
+        <button onclick="adicionarQuadra('${bairro}')">➕ Adicionar quadra</button>
+        <button onclick="exportarCSV('${bairro}')">Exportar CSV (bairro)</button>
+        <button onclick="exportarJSON('${bairro}')">Exportar JSON (bairro)</button>
+        <button onclick="enviarGoogleSheets('${bairro}')">Salvar no Google Sheets (bairro)</button>
+        <button onclick="abrirRelatorioModal()">Gerar relatório (data)</button>
+      </div>
+
+      <div id="lista-${escapeId(bairro)}" style="margin-top:12px"></div>
+    </div>
+  `;
+  renderizarQuadras(bairro);
+}
+
+/* Add new quadra object */
+function adicionarQuadra(bairro){
+  const q = { id: Date.now() + Math.floor(Math.random()*1000), codigo:'', responsavel:'', imagem:'', data_inicio:'', data_fim:'', observacoes:'' };
+  dados[bairro].push(q);
+  renderizarQuadras(bairro);
+}
+
+/* Render quadras for bairro */
+function renderizarQuadras(bairro){
+  const cont = document.getElementById(`lista-${escapeId(bairro)}`);
+  if(!cont) return;
+  cont.innerHTML = '';
+  const arr = dados[bairro];
+  if(arr.length===0){
+    cont.innerHTML = '<div class="muted">Nenhuma quadra adicionada ainda.</div>';
+    return;
+  }
+  arr.forEach((q, idx) => {
+    const box = document.createElement('div');
+    box.className = 'quadra';
+    box.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h3>Quadra ${idx+1} <small class="muted">[Código: ${q.codigo || '—'}]</small></h3>
+        <div style="font-size:13px;color:#666">ID: ${q.id}</div>
+      </div>
+
+      <label>Código do mapa (único):</label>
+      <input type="text" id="codigo-${bairro}-${q.id}" value="${escapeHtml(q.codigo)}" placeholder="ex: MAP-001">
+
+      <label>Responsável:</label>
+      <input type="text" id="resp-${bairro}-${q.id}" value="${escapeHtml(q.responsavel)}" placeholder="Nome do responsável">
+
+      <div style="margin-top:8px" class="row">
+        <div class="col">
+          <label>Data de início:</label>
+          <input type="date" id="inicio-${bairro}-${q.id}" value="${q.data_inicio}">
+        </div>
+        <div class="col">
+          <label>Data de término (opcional):</label>
+          <input type="date" id="fim-${bairro}-${q.id}" value="${q.data_fim}">
+        </div>
+      </div>
+
+      <label style="margin-top:8px">Observações:</label>
+      <textarea id="obs-${bairro}-${q.id}">${escapeHtml(q.observacoes)}</textarea>
+
+      <label style="margin-top:8px">Imagem do mapa:</label>
+      <div class="thumb" id="thumb-${bairro}-${q.id}">
+        ${q.imagem? `<img src="${q.imagem}" alt="mapa">` : '<span class="muted">(clique ou arraste uma imagem)</span>'}
+      </div>
+      <input type="file" id="file-${bairro}-${q.id}" accept="image/*">
+
+      <div class="controls" style="margin-top:8px">
+        <button onclick="salvarQuadraLocal('${bairro}', ${q.id})" class="small">Salvar local</button>
+        <button onclick="confirmRemover('${bairro}', ${q.id})" class="small ghost">Remover</button>
+      </div>
+    `;
+    cont.appendChild(box);
+
+    // bind inputs AFTER element is in DOM
+    const codigoInput = document.getElementById(`codigo-${bairro}-${q.id}`);
+    const respInput = document.getElementById(`resp-${bairro}-${q.id}`);
+    const inicioInput = document.getElementById(`inicio-${bairro}-${q.id}`);
+    const fimInput = document.getElementById(`fim-${bairro}-${q.id}`);
+    const obsInput = document.getElementById(`obs-${bairro}-${q.id}`);
+    const fileInput = document.getElementById(`file-${bairro}-${q.id}`);
+    const thumb = document.getElementById(`thumb-${bairro}-${q.id}`);
+
+    // when user changes, we update q in memory immediately
+    codigoInput.onchange = ()=> {
+      const val = codigoInput.value.trim();
+      // check uniqueness across all bairros
+      if(val && codigoExiste(val, bairro, q.id)){
+        alert('Código já existe em outro mapa. Escolha um código único.');
+        codigoInput.value = q.codigo || '';
+        return;
+      }
+      q.codigo = val;
+    };
+    respInput.oninput = ()=> q.responsavel = respInput.value;
+    inicioInput.onchange = ()=> q.data_inicio = inicioInput.value;
+    fimInput.onchange = ()=> q.data_fim = fimInput.value;
+    obsInput.oninput = ()=> q.observacoes = obsInput.value;
+
+    // file handling
+    fileInput.onchange = (e)=>{
+      const f = e.target.files && e.target.files[0];
+      if(!f) return;
+      const url = URL.createObjectURL(f);
+      q.imagem = url;
+      // re-render so image appears
+      renderizarQuadras(bairro);
+    };
+    // drag & drop on thumb
+    thumb.ondragover = ev => { ev.preventDefault(); thumb.style.opacity = 0.8; };
+    thumb.ondragleave = ev => { thumb.style.opacity = 1; };
+    thumb.ondrop = ev => {
+      ev.preventDefault(); thumb.style.opacity=1;
+      const f = ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if(!f) return;
+      q.imagem = URL.createObjectURL(f);
+      renderizarQuadras(bairro);
+    };
+    // clicking thumb opens file input
+    thumb.onclick = ()=> fileInput.click();
+  });
+}
+
+/* Save single quadra in local model (already in memory, but this function can be used to enforce validations) */
+function salvarQuadraLocal(bairro, id){
+  const q = dados[bairro].find(x=>x.id===id);
+  if(!q) { alert('Registro não encontrado'); return; }
+  if(q.codigo && codigoExiste(q.codigo, bairro, id)){
+    alert('Código do mapa duplicado. Informe um código único antes de salvar.');
+    return;
+  }
+  // data_inicio required? Not required but good to warn if empty
+  if(!q.data_inicio) {
+    if(!confirm('A quadra não tem data de início. Deseja salvar mesmo assim?')) return;
+  }
+  alert('Registro salvo localmente na sessão do navegador.');
+}
+
+/* Confirm remove with password */
+function confirmRemover(bairro, id){
+  const senha = prompt('Para excluir este mapa, insira a senha de confirmação:');
+  if(senha === null) return; // cancelado
+  if(senha !== DELETE_PASSWORD){
+    alert('Senha incorreta. Exclusão cancelada.');
+    return;
+  }
+  // proceed remove
+  dados[bairro] = dados[bairro].filter(q=>q.id !== id);
+  renderizarQuadras(bairro);
+}
+
+/* Check whether a code exists in any bairro other than optionally excluded (by id) */
+function codigoExiste(codigo, bairroExcl, idExcl){
+  if(!codigo) return false;
+  const normalized = codigo.trim().toLowerCase();
+  for(const b of Object.keys(dados)){
+    for(const q of dados[b]){
+      if(b===bairroExcl && q.id===idExcl) continue;
+      if(q.codigo && q.codigo.trim().toLowerCase() === normalized) return true;
+    }
+  }
+  return false;
+}
+
+/* Remove HTML dangerous chars for inputs when generating CSV/JSON */
+function escapeHtml(s){ if(!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;').replace(/>/g,'&gt;'); }
+function escapeCsvField(s){ if(s==null) return ''; return `"${String(s).replace(/"/g,'""')}"`; }
+function escapeId(s){ return s.replace(/\s+/g,'_').replace(/[^\w\-]/g,''); }
+
+/* Remove all data (with confirmation) */
+function limparTudo(){
+  if(!confirm('Limpar todos os registros desta sessão?')) return;
+  bairros.forEach(b => dados[b]=[]);
+  mostrarBairro(bairros[0]);
+}
+
+/* Export CSV for a bairro */
+function exportarCSV(bairro){
+  const arr = dados[bairro];
+  if(!arr.length){ alert('Nenhuma quadra neste bairro para exportar.'); return; }
+  const header = ['Bairro','CodigoMapa','Responsavel','DataInicio','DataFim','Observacoes'];
+  const rows = [header];
+  arr.forEach((q, idx) => {
+    rows.push([
+      bairro,
+      q.codigo || '',
+      q.responsavel || '',
+      q.data_inicio || '',
+      q.data_fim || '',
+      q.observacoes || ''
+    ]);
+  });
+  const csv = rows.map(r => r.map(c=> escapeCsvField(c)).join(',')).join('\n');
+  downloadBlob(csv, `registros_${bairro.replace(/\s+/g,'_')}.csv`, 'text/csv');
+}
+
+/* Export JSON */
+function exportarJSON(bairro){
+  const arr = dados[bairro];
+  if(!arr.length){ alert('Nenhuma quadra neste bairro para exportar.'); return; }
+  downloadBlob(JSON.stringify(arr, null, 2), `registros_${bairro.replace(/\s+/g,'_')}.json`, 'application/json');
+}
+
+/* Download helpers */
+function downloadBlob(content, filename, type){
+  const blob = new Blob([content], { type });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/* ========= Relatório global (por data range) =========
+   Abre modal (prompt-like) pedindo data inicial, final e opcional filtro.
+   Gera CSV/JSON de todas as quadras de todos os bairros que satisfaçam:
+   - data_inicio OR data_fim dentro do intervalo OR both (we include quadras that overlap interval)
+*/
+function abrirRelatorioModal(){
+  // Simple prompt sequence for start and end (could be replaced with nicer modal)
+  const start = prompt('Data inicial do relatório (AAAA-MM-DD):');
+  if(start === null) return;
+  if(!/^\\d{4}-\\d{2}-\\d{2}$/.test(start)){ alert('Formato inválido. Use AAAA-MM-DD'); return; }
+  const end = prompt('Data final do relatório (AAAA-MM-DD):');
+  if(end === null) return;
+  if(!/^\\d{4}-\\d{2}-\\d{2}$/.test(end)){ alert('Formato inválido. Use AAAA-MM-DD'); return; }
+  const bairroFilter = prompt('Filtrar por bairro? (deixe em branco para todos)') || '';
+  const codigoFilter = prompt('Filtrar por código do mapa? (deixe em branco para todos)') || '';
+  gerarRelatorio(start, end, bairroFilter.trim(), codigoFilter.trim());
+}
+
+/* Parse date strings to Date objects (midnight) */
+function parseDate(d){
+  if(!d) return null;
+  const parts = d.split('-'); if(parts.length!==3) return null;
+  return new Date(Number(parts[0]), Number(parts[1])-1, Number(parts[2]));
+}
+
+/* Check if quadra overlaps interval.
+   We consider a quadra relevant if:
+   - data_inicio or data_fim is within [start,end], or
+   - quadra interval covers entire [start,end] (start <= fim && fim >= start)
+*/
+function quadraDentroIntervalo(q, startDate, endDate){
+  const s = parseDate(q.data_inicio);
+  const f = parseDate(q.data_fim);
+  // if both missing, ignore
+  if(!s && !f) return false;
+  // if only start exists
+  if(s && !f) return (s >= startDate && s <= endDate);
+  // if only end exists
+  if(!s && f) return (f >= startDate && f <= endDate);
+  // both exist -> overlap test
+  return !(f < startDate || s > endDate);
+}
+
+/* Generate report across all bairros */
+function gerarRelatorio(startStr, endStr, bairroFilter='', codigoFilter=''){
+  const startDate = parseDate(startStr);
+  const endDate = parseDate(endStr);
+  if(!startDate || !endDate){ alert('Datas inválidas'); return; }
+  if(endDate < startDate){ alert('Data final menor que inicial'); return; }
+
+  const rows = [['Bairro','CodigoMapa','Responsavel','DataInicio','DataFim','Observacoes']];
+  const jsonOut = [];
+
+  for(const bairro of Object.keys(dados)){
+    if(bairroFilter && bairro !== bairroFilter) continue;
+    for(const q of dados[bairro]){
+      if(codigoFilter && q.codigo !== codigoFilter) continue;
+      if(quadraDentroIntervalo(q, startDate, endDate)){
+        rows.push([
+          bairro,
+          q.codigo || '',
+          q.responsavel || '',
+          q.data_inicio || '',
+          q.data_fim || '',
+          q.observacoes || ''
+        ]);
+        jsonOut.push(Object.assign({bairro}, q));
+      }
+    }
+  }
+
+  if(rows.length===1){
+    alert('Nenhum registro encontrado no intervalo fornecido.');
+    return;
+  }
+
+  // create menu: ask CSV or JSON
+  const opc = prompt('Gerar relatório em formato (digite CSV ou JSON):','CSV');
+  if(opc === null) return;
+  if(opc.toLowerCase() === 'json'){
+    downloadBlob(JSON.stringify(jsonOut, null, 2), `relatorio_${startStr}_a_${endStr}.json`, 'application/json');
+  } else {
+    const csv = rows.map(r => r.map(c=>escapeCsvField(c)).join(',')).join('\n');
+    downloadBlob(csv, `relatorio_${startStr}_a_${endStr}.csv`, 'text/csv');
+  }
+}
+
+/* ======= Envio para Google Sheets (apenas bairro atual) =======
+   Envia todos os registros do bairro atual ao Apps Script (POST JSON).
+   O Apps Script deve receber e tratar o array de objetos.
+*/
+async function enviarGoogleSheets(bairro){
+  if(!GOOGLE_SCRIPT_URL || GOOGLE_SCRIPT_URL.includes('COLE_AQUI')) {
+    alert('Cole a URL do Apps Script na variável GOOGLE_SCRIPT_URL no topo do arquivo.');
+    return;
+  }
+  const lista = dados[bairro];
+  if(!lista.length){ alert('Nenhuma quadra para enviar neste bairro.'); return; }
+  // prepare payload
+  const payload = lista.map((q, idx)=>({
+    bairro,
+    codigo: q.codigo || '',
+    responsavel: q.responsavel || '',
+    data_inicio: q.data_inicio || '',
+    data_fim: q.data_fim || '',
+    observacoes: q.observacoes || ''
+  }));
+  try{
+    await fetch(GOOGLE_SCRIPT_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    alert(`Dados do ${bairro} enviados para o Google Sheets (apenas bairro atual).`);
+  } catch(err){
+    console.error(err);
+    alert('Erro ao enviar (ver console).');
+  }
+}
+
+/* ========== Inicialização ========== */
+init();
+
+/* Optional: expose some helpers to window for debugging */
+window._dados = dados;
+window._exportarCSV = exportarCSV;
+window._gerarRelatorio = gerarRelatorio;
+
+</script>
+</body>
+</html>
